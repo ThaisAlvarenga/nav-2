@@ -24,16 +24,16 @@ scene.add(light);
 scene.add(new THREE.AmbientLight(0xffffff, 0.1));
 
 // --------- Camera ---------
-// In VR, pose/FOV/aspect come from the VR system. We set a reasonable standing height for non-VR.
 const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
 camera.position.set(0, 1.6, 0); // ~1.6m standing height
+scene.add(camera); // <-- we'll reparent this into the rig when XR starts
 
-// Desktop navigation (disabled by the VR runtime when in XR)
+// Desktop navigation
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(0, 1.6, -2);
 controls.update();
 
-// --------- World geometry (meters) ---------
+// ========= World geometry (meters) =========
 const floorGeometry = new THREE.PlaneGeometry(25, 20);
 const floorMesh = new THREE.Mesh(
   floorGeometry,
@@ -44,8 +44,8 @@ floorMesh.name = 'Floor';
 floorMesh.receiveShadow = true;
 scene.add(floorMesh);
 
-const boxGeometry = new THREE.BoxGeometry(1, 1, 1);         // 1m cubes (VR uses meters)
-const cylinderGeometry = new THREE.CylinderGeometry(0.5, 0.5, 1.0); // 1m tall cylinder
+const boxGeometry = new THREE.BoxGeometry(1, 1, 1);
+const cylinderGeometry = new THREE.CylinderGeometry(0.5, 0.5, 1.0);
 const material = new THREE.MeshLambertMaterial();
 
 function createMesh(geometry, material, x, y, z, name, layer) {
@@ -71,21 +71,119 @@ boxes.add(createMesh(boxGeometry, material, -3.0, 1.6, -2, 'Box B', 0));
 boxes.add(createMesh(boxGeometry, material, -1.8, 2.6, -2, 'Box C', 0));
 scene.add(boxes);
 
-// --------- Render loop (WebXR-friendly) ---------
-function render(time) {
-  // time *= 0.001; // use if you animate by time
+// ========= Quest-style XR locomotion =========
 
-  // Keep desktop controls smooth when not in VR
-  if (!renderer.xr.isPresenting) controls.update();
+// === Rig that we move in XR (the camera is parented into this in XR) ===
+const rig = new THREE.Group();
+scene.add(rig);
 
-  renderer.render(scene, camera);
+// Quest detection (kept simple; works on Quest/Oculus Browser/Meta Browser)
+const questLikeUA = /OculusBrowser|Meta|Quest|Oculus/i.test(navigator.userAgent);
+
+// Controller models (nice visuals in XR)
+const controllerModelFactory = new XRControllerModelFactory();
+for (let i = 0; i < 2; i++) {
+  const grip = renderer.xr.getControllerGrip(i);
+  grip.add(controllerModelFactory.createControllerModel(grip));
+  scene.add(grip);
 }
 
-renderer.setAnimationLoop(render); // <— Let three.js drive the loop (needed for VR)
+// Movement tuning
+const NAV = {
+  moveSpeed: 2.5,      // m/s
+  rotateSpeed: 1.8,    // rad/s
+  deadzone: 0.08
+};
+
+// Compute head-relative flat forward/right
+function getHeadBasis() {
+  const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+  fwd.y = 0;
+  if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1);
+  fwd.normalize();
+  const right = new THREE.Vector3().crossVectors(fwd, new THREE.Vector3(0, 1, 0)).negate().normalize();
+  return { fwd, right };
+}
+
+// Make sure the rig starts where the camera currently is (world space)
+function syncRigToCamera() {
+  const camWorldPos = new THREE.Vector3();
+  camera.getWorldPosition(camWorldPos);
+  rig.position.copy(camWorldPos);
+  rig.rotation.set(0, 0, 0);
+}
+
+// Reparent camera for XR (and restore for desktop)
+renderer.xr.addEventListener('sessionstart', () => {
+  syncRigToCamera();
+  rig.add(camera);
+  controls.enabled = false;
+});
+renderer.xr.addEventListener('sessionend', () => {
+  scene.add(camera);
+  controls.enabled = true;
+  controls.update();
+});
+
+// Per-frame XR locomotion (only if Quest-like)
+function updateXRLocomotion(dt) {
+  const session = renderer.xr.getSession?.();
+  if (!session || !questLikeUA) return;
+
+  // Aggregate inputs by handedness
+  let leftX = 0, leftY = 0, rightX = 0;
+
+  session.inputSources.forEach((src) => {
+    const gp = src.gamepad;
+    if (!gp) return;
+
+    // Prefer [2,3] (common on Quest), fall back to [0,1]
+    const axX = gp.axes[2] ?? gp.axes[0] ?? 0;
+    const axY = gp.axes[3] ?? gp.axes[1] ?? 0;
+
+    if (src.handedness === 'left') {
+      leftX = Math.abs(axX) > NAV.deadzone ? axX : 0;
+      leftY = Math.abs(axY) > NAV.deadzone ? axY : 0;
+    } else if (src.handedness === 'right') {
+      rightX = Math.abs(axX) > NAV.deadzone ? axX : 0;
+    }
+  });
+
+  // Head-relative translation from left stick
+  if (leftX !== 0 || leftY !== 0) {
+    const { fwd, right } = getHeadBasis();
+    // On most pads: up = -Y. We want up to move forward.
+    const moveVec = new THREE.Vector3()
+      .addScaledVector(fwd, -leftY)
+      .addScaledVector(right, leftX)
+      .multiplyScalar(NAV.moveSpeed * dt);
+    rig.position.add(moveVec);
+  }
+
+  // Smooth yaw from right stick X
+  if (rightX !== 0) {
+    rig.rotation.y -= rightX * NAV.rotateSpeed * dt;
+  }
+}
+
+// --------- Render loop (WebXR-friendly) ---------
+let last = performance.now();
+renderer.setAnimationLoop(() => {
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+
+  if (renderer.xr.isPresenting) {
+    updateXRLocomotion(dt);  // <-- Quest-style movement in XR
+  } else {
+    controls.update();       // desktop
+  }
+
+  renderer.render(scene, camera);
+});
 
 // --------- Resize handling ---------
 window.addEventListener('resize', () => {
-  // In VR, projection is managed by the runtime; this is for desktop mode.
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
