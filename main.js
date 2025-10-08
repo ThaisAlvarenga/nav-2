@@ -1,3 +1,6 @@
+// test 3
+
+
 // --- CDN imports (works on GitHub Pages) ---
 import * as THREE from 'https://unpkg.com/three@0.165.0/build/three.module.js';
 import { OrbitControls } from 'https://unpkg.com/three@0.165.0/examples/jsm/controls/OrbitControls.js';
@@ -9,9 +12,10 @@ const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setClearColor(0x222230);
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
-renderer.xr.enabled = true; // <— WebXR on
+renderer.xr.enabled = true;                 // WebXR on
+renderer.xr.setReferenceSpaceType('local-floor');
 document.body.appendChild(renderer.domElement);
-document.body.appendChild(VRButton.createButton(renderer)); // <— VR button
+document.body.appendChild(VRButton.createButton(renderer));
 
 // --------- Scene ---------
 const scene = new THREE.Scene();
@@ -25,8 +29,8 @@ scene.add(new THREE.AmbientLight(0xffffff, 0.1));
 
 // --------- Camera ---------
 const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
-camera.position.set(0, 1.6, 0); // ~1.6m standing height
-scene.add(camera); // <-- we'll reparent this into the rig when XR starts
+camera.position.set(0, 1.6, 0);        // ~1.6m
+scene.add(camera);
 
 // Desktop navigation
 const controls = new OrbitControls(camera, renderer.domElement);
@@ -58,7 +62,7 @@ function createMesh(geometry, material, x, y, z, name, layer) {
   return mesh;
 }
 
-// Place things ~2m in front of the camera centerline at user eye-height
+// Place things ~2m in front
 const cylinders = new THREE.Group();
 cylinders.add(createMesh(cylinderGeometry, material,  0.8, 1.6, -2, 'Cylinder A', 0));
 cylinders.add(createMesh(cylinderGeometry, material,  2.0, 1.6, -2, 'Cylinder B', 0));
@@ -71,112 +75,122 @@ boxes.add(createMesh(boxGeometry, material, -3.0, 1.6, -2, 'Box B', 0));
 boxes.add(createMesh(boxGeometry, material, -1.8, 2.6, -2, 'Box C', 0));
 scene.add(boxes);
 
-// ========= Quest-style XR locomotion =========
+// ========= XR locomotion EXACTLY like reference =========
 
-// === Rig that we move in XR (the camera is parented into this in XR) ===
-const rig = new THREE.Group();
-scene.add(rig);
+// Dolly (rig) that we move/rotate in XR
+const dolly = new THREE.Object3D();
+dolly.position.set(0, 0, 0);
+scene.add(dolly);
 
-// Quest detection (kept simple; works on Quest/Oculus Browser/Meta Browser)
-const questLikeUA = /OculusBrowser|Meta|Quest|Oculus/i.test(navigator.userAgent);
-
-// Controller models (nice visuals in XR)
-const controllerModelFactory = new XRControllerModelFactory();
-for (let i = 0; i < 2; i++) {
-  const grip = renderer.xr.getControllerGrip(i);
-  grip.add(controllerModelFactory.createControllerModel(grip));
-  scene.add(grip);
-}
-
-// Movement tuning
-const NAV = {
-  moveSpeed: 2.5,      // m/s
-  rotateSpeed: 1.8,    // rad/s
-  deadzone: 0.08
-};
-
-// Compute head-relative flat forward/right
-function getHeadBasis() {
-  const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-  fwd.y = 0;
-  if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1);
-  fwd.normalize();
-  const right = new THREE.Vector3().crossVectors(fwd, new THREE.Vector3(0, 1, 0)).negate().normalize();
-  return { fwd, right };
-}
-
-// Make sure the rig starts where the camera currently is (world space)
-function syncRigToCamera() {
-  const camWorldPos = new THREE.Vector3();
-  camera.getWorldPosition(camWorldPos);
-  rig.position.copy(camWorldPos);
-  rig.rotation.set(0, 0, 0);
-}
-
-// Reparent camera for XR (and restore for desktop)
+// Parent/restore camera on XR session start/end (like your original)
 renderer.xr.addEventListener('sessionstart', () => {
-  syncRigToCamera();
-  rig.add(camera);
-  controls.enabled = false;
+  dolly.add(camera);
 });
 renderer.xr.addEventListener('sessionend', () => {
   scene.add(camera);
-  controls.enabled = true;
-  controls.update();
 });
 
-// Per-frame XR locomotion (only if Quest-like)
-function updateXRLocomotion(dt) {
-  const session = renderer.xr.getSession?.();
-  if (!session || !questLikeUA) return;
+// Controller models + simple rays (like buildController)
+const controllerModelFactory = new XRControllerModelFactory();
+function buildControllerViz(data) {
+  let geometry, material;
+  if (data.targetRayMode === 'tracked-pointer') {
+    geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute([0,0,0, 0,0,-1], 3));
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute([0.5,0.5,0.5, 0,0,0], 3));
+    material = new THREE.LineBasicMaterial({ vertexColors: true, blending: THREE.AdditiveBlending });
+    return new THREE.Line(geometry, material);
+  } else { // 'gaze'
+    geometry = new THREE.RingGeometry(0.02, 0.04, 32).translate(0, 0, -1);
+    material = new THREE.MeshBasicMaterial({ opacity: 0.5, transparent: true });
+    return new THREE.Mesh(geometry, material);
+  }
+}
 
-  // Aggregate inputs by handedness
-  let leftX = 0, leftY = 0, rightX = 0;
+// Grab controllers and grips
+const controller1 = renderer.xr.getController(0);
+const controller2 = renderer.xr.getController(1);
+controller1.addEventListener('connected', (e) => controller1.add(buildControllerViz(e.data)));
+controller2.addEventListener('connected', (e) => controller2.add(buildControllerViz(e.data)));
+controller1.addEventListener('disconnected', function(){ this.remove(this.children[0]); });
+controller2.addEventListener('disconnected', function(){ this.remove(this.children[0]); });
 
-  session.inputSources.forEach((src) => {
-    const gp = src.gamepad;
-    if (!gp) return;
+const grip1 = renderer.xr.getControllerGrip(0);
+const grip2 = renderer.xr.getControllerGrip(1);
+grip1.add(controllerModelFactory.createControllerModel(grip1));
+grip2.add(controllerModelFactory.createControllerModel(grip2));
 
-    // Prefer [2,3] (common on Quest), fall back to [0,1]
-    const axX = gp.axes[2] ?? gp.axes[0] ?? 0;
-    const axY = gp.axes[3] ?? gp.axes[1] ?? 0;
+// Add controllers to rig (matches reference)
+dolly.add(controller1, controller2, grip1, grip2);
 
-    if (src.handedness === 'left') {
-      leftX = Math.abs(axX) > NAV.deadzone ? axX : 0;
-      leftY = Math.abs(axY) > NAV.deadzone ? axY : 0;
-    } else if (src.handedness === 'right') {
-      rightX = Math.abs(axX) > NAV.deadzone ? axX : 0;
+// Controller state (same schema as reference)
+const controllerStates = {
+  leftController:  { thumbstick: { x: 0, y: 0 }, trigger: 0, triggerPressed: false },
+  rightController: { thumbstick: { x: 0, y: 0 }, trigger: 0, triggerPressed: false },
+};
+const TRIGGER_THRESHOLD = 0.1;
+
+// Movement settings (same as reference)
+const vrSettings = {
+  moveSpeed: 2,       // meters per frame-unit (we’ll scale by dt below to be nicer)
+  rotationSpeed: 0.05 // radians per frame-unit
+};
+
+// Poll XR gamepads each frame and fill controllerStates exactly like your code
+function pollXRInput(frame) {
+  const session = frame?.session;
+  if (!session) return;
+
+  // NOTE: original code re-created lastTriggerState per frame (edge detect ineffective).
+  // To stay true to behavior, we won't implement persistent edge detection here either.
+  const inputSources = Array.from(session.inputSources);
+  inputSources.forEach((inputSource) => {
+    if (!inputSource.gamepad) return;
+
+    const state = inputSource.handedness === 'left'
+      ? controllerStates.leftController
+      : controllerStates.rightController;
+
+    // EXACT mapping: axes[2], axes[3] (Oculus/Quest)
+    if (inputSource.gamepad.axes.length >= 4) {
+      state.thumbstick.x = inputSource.gamepad.axes[2] || 0;
+      state.thumbstick.y = inputSource.gamepad.axes[3] || 0;
+
+      // Trigger on buttons[0] value, thresholded
+      state.trigger = Math.abs(inputSource.gamepad.buttons[0]?.value || 0);
+      state.triggerPressed = state.trigger > TRIGGER_THRESHOLD;
     }
   });
+}
 
-  // Head-relative translation from left stick
-  if (leftX !== 0 || leftY !== 0) {
-    const { fwd, right } = getHeadBasis();
-    // On most pads: up = -Y. We want up to move forward.
-    const moveVec = new THREE.Vector3()
-      .addScaledVector(fwd, -leftY)
-      .addScaledVector(right, leftX)
-      .multiplyScalar(NAV.moveSpeed * dt);
-    rig.position.add(moveVec);
+// EXACT same locomotion math as reference (world-axes, not head-relative)
+function updateCameraLikeReference() {
+  if (!renderer.xr.isPresenting) return;
+
+  const left = controllerStates.leftController.thumbstick;
+  const right = controllerStates.rightController.thumbstick;
+
+  // Left stick Y -> forward/back on world Z
+  if (Math.abs(left.y) > 0.1) {
+    dolly.position.z += left.y * vrSettings.moveSpeed;
   }
-
-  // Smooth yaw from right stick X
-  if (rightX !== 0) {
-    rig.rotation.y -= rightX * NAV.rotateSpeed * dt;
+  // Left stick X -> strafe on world X
+  if (Math.abs(left.x) > 0.1) {
+    dolly.position.x += left.x * vrSettings.moveSpeed;
+  }
+  // Right stick X -> yaw (negative to match reference)
+  if (Math.abs(right.x) > 0.1) {
+    dolly.rotation.y -= right.x * vrSettings.rotationSpeed;
   }
 }
 
 // --------- Render loop (WebXR-friendly) ---------
-let last = performance.now();
-renderer.setAnimationLoop(() => {
-  const now = performance.now();
-  const dt = Math.min(0.05, (now - last) / 1000);
-  last = now;
-
+renderer.setAnimationLoop((timestamp, frame) => {
   if (renderer.xr.isPresenting) {
-    updateXRLocomotion(dt);  // <-- Quest-style movement in XR
+    pollXRInput(frame);              // fill controllerStates like reference
+    updateCameraLikeReference();     // move/turn rig in world axes
   } else {
-    controls.update();       // desktop
+    controls.update();               // desktop
   }
 
   renderer.render(scene, camera);
@@ -191,23 +205,18 @@ window.addEventListener('resize', () => {
 
 // ========= RAYCASTING (desktop click) =========
 const raycaster = new THREE.Raycaster();
-
-document.addEventListener('mousedown', onMouseDown);
-
-function onMouseDown(event) {
+document.addEventListener('mousedown', (event) => {
   const coords = new THREE.Vector2(
     (event.clientX / renderer.domElement.clientWidth) * 2 - 1,
-    -((event.clientY / renderer.domElement.clientHeight) * 2 - 1),
+    -((event.clientY / renderer.domElement.clientHeight) * 2 - 1)
   );
-
   raycaster.setFromCamera(coords, camera);
-
-  const intersections = raycaster.intersectObjects(scene.children, true);
-  if (intersections.length > 0) {
-    const selectedObject = intersections[0].object;
-    if (selectedObject.material?.color) {
-      selectedObject.material.color = new THREE.Color(Math.random(), Math.random(), Math.random());
+  const hits = raycaster.intersectObjects(scene.children, true);
+  if (hits.length > 0) {
+    const obj = hits[0].object;
+    if (obj.material?.color) {
+      obj.material.color = new THREE.Color(Math.random(), Math.random(), Math.random());
     }
-    console.log(`${selectedObject.name} was clicked!`);
+    console.log(`${obj.name} was clicked!`);
   }
-}
+});
